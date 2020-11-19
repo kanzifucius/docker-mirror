@@ -29,3 +29,8 @@ repositories:
     match_tag:
       - "v*"
 
+# enable direct ECR authentication using OIDC
+enableOidc: true
+
+# run the job on a cron every <scheduleMinutes> minutes
+scheduleMinutes: 2
