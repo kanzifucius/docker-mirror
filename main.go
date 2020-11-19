@@ -10,23 +10,26 @@ import (
 	"sync"
 	"time"
 
-	"github.com/aws/aws-sdk-go-v2/aws/external"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/cenkalti/backoff"
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/go-co-op/gocron"
 	log "github.com/sirupsen/logrus"
 	"gopkg.in/yaml.v2"
 )
 
 var (
-	config Config
+	progConf Config
 )
 
 // Config is the result of the parsed yaml file
 type Config struct {
-	Workers      int          `yaml:"workers"`
-	Repositories []Repository `yaml:"repositories,flow"`
-	Target       TargetConfig `yaml:"target"`
+	Workers         int          `yaml:"workers"`
+	Repositories    []Repository `yaml:"repositories,flow"`
+	Target          TargetConfig `yaml:"target"`
+	Oidc            bool         `yaml:"enableOidc"`
+	ScheduleMinutes uint64       `yaml:"scheduleMinutes"`
 }
 
 // TargetConfig contains info on where to mirror repositories to
@@ -48,15 +51,7 @@ type Repository struct {
 }
 
 func main() {
-	// log level
-	if rawLevel := os.Getenv("LOG_LEVEL"); rawLevel != "" {
-		logLevel, err := log.ParseLevel(rawLevel)
-		if err != nil {
-			log.Fatal(err)
-		}
-		log.SetLevel(logLevel)
-	}
-
+	log.Info("Reading config from file")
 	// mirror file to read
 	configFile := "config.yaml"
 	if f := os.Getenv("CONFIG_FILE"); f != "" {
@@ -68,16 +63,34 @@ func main() {
 		log.Fatal(fmt.Sprintf("Could not read config file: %s", err))
 	}
 
-	if err := yaml.Unmarshal(content, &config); err != nil {
+	if err := yaml.Unmarshal(content, &progConf); err != nil {
 		log.Fatal(fmt.Sprintf("Could not parse config file: %s", err))
 	}
 
-	if config.Target.Registry == "" {
+	log.Infof("Scheduling job to run every %v minutes", progConf.ScheduleMinutes)
+	sched := gocron.NewScheduler(time.UTC)
+	// sched.Every(1).Day().Do(startJob)
+	sched.Every(progConf.ScheduleMinutes).Minutes().Do(startJob)
+	sched.StartBlocking()
+}
+
+func startJob() {
+	log.Info("Starting run of scheduled mirror job")
+	// log level
+	if rawLevel := os.Getenv("LOG_LEVEL"); rawLevel != "" {
+		logLevel, err := log.ParseLevel(rawLevel)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.SetLevel(logLevel)
+	}
+
+	if progConf.Target.Registry == "" {
 		log.Fatal("Missing `target -> registry` yaml config")
 	}
 
-	if config.Workers == 0 {
-		config.Workers = runtime.NumCPU()
+	if progConf.Workers == 0 {
+		progConf.Workers = runtime.NumCPU()
 	}
 
 	// number of workers
@@ -87,7 +100,7 @@ func main() {
 			log.Fatal(fmt.Sprintf("Could not parse NUM_WORKERS env: %s", err))
 		}
 
-		config.Workers = p
+		progConf.Workers = p
 	}
 
 	// init Docker client
@@ -105,13 +118,13 @@ func main() {
 
 	// init AWS client
 	log.Info("Creating AWS client")
-	cfg, err := external.LoadDefaultAWSConfig()
+	cfg, err := config.LoadDefaultConfig()
 	if err != nil {
 		log.Fatalf("Unable to load AWS SDK config, " + err.Error())
 	}
 
 	// pre-load ECR repositories
-	ecrManager := &ecrManager{client: ecr.New(cfg)}
+	ecrManager := &ecrManager{client: ecr.NewFromConfig(cfg)}
 
 	backoffSettings := backoff.NewExponentialBackOff()
 	backoffSettings.InitialInterval = 1 * time.Second
@@ -129,14 +142,14 @@ func main() {
 	var wg sync.WaitGroup
 
 	// start background workers
-	for i := 0; i < config.Workers; i++ {
+	for i := 0; i < progConf.Workers; i++ {
 		go worker(&wg, workerCh, client, ecrManager)
 	}
 
 	prefix := os.Getenv("PREFIX")
 
 	// add jobs for the workers
-	for _, repo := range config.Repositories {
+	for _, repo := range progConf.Repositories {
 		if prefix != "" && !strings.HasPrefix(repo.Name, prefix) {
 			continue
 		}

@@ -1,13 +1,15 @@
 package main
 
 import (
+	"context"
+
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/cenkalti/backoff"
 	log "github.com/sirupsen/logrus"
 )
 
 type ecrManager struct {
-	client       *ecr.ECR        // AWS ECR client
+	client       *ecr.Client     // AWS ECR client
 	repositories map[string]bool // list of repositories in ECR
 }
 
@@ -28,10 +30,9 @@ func (e *ecrManager) ensure(name string) error {
 }
 
 func (e *ecrManager) create(name string) error {
-	req := e.client.CreateRepositoryRequest(&ecr.CreateRepositoryInput{
+	_, err := e.client.CreateRepository(context.Background(), &ecr.CreateRepositoryInput{
 		RepositoryName: &name,
 	})
-	_, err := req.Send()
 	if err != nil {
 		return err
 	}
@@ -40,15 +41,32 @@ func (e *ecrManager) create(name string) error {
 	return nil
 }
 
+func (e *ecrManager) Login() (string, error) {
+	log.Info("Obtaining authorization token from AWS...")
+	output, err := e.client.GetAuthorizationToken(context.Background(), &ecr.GetAuthorizationTokenInput{})
+	if err != nil {
+		log.Errorf("Unable to obtain authorization token: %s", err)
+	}
+
+	var auth string
+
+	for _, authData := range output.AuthorizationData {
+		auth = *authData.AuthorizationToken
+	}
+
+	log.Info("Authorization token obtained successfully from AWS...")
+
+	return auth, err
+}
+
 func (e *ecrManager) buildCache(nextToken *string) error {
 	if nextToken == nil {
 		log.Info("Loading list of ECR repositories")
 	}
 
-	req := e.client.DescribeRepositoriesRequest(&ecr.DescribeRepositoriesInput{
+	resp, err := e.client.DescribeRepositories(context.Background(), &ecr.DescribeRepositoriesInput{
 		NextToken: nextToken,
 	})
-	resp, err := req.Send()
 	if err != nil {
 		return err
 	}

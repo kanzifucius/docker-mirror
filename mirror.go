@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/fsouza/go-dockerclient"
+	docker "github.com/fsouza/go-dockerclient"
 	"github.com/google/go-github/github"
 	"github.com/ryanuber/go-glob"
 	log "github.com/sirupsen/logrus"
@@ -150,7 +150,7 @@ func (m *mirror) targetRepositoryName() string {
 		return fmt.Sprintf("%s%s", *m.repo.TargetPrefix, m.repo.Name)
 	}
 
-	return fmt.Sprintf("%s%s", config.Target.Prefix, m.repo.Name)
+	return fmt.Sprintf("%s%s", progConf.Target.Prefix, m.repo.Name)
 }
 
 // pull the image from remote repository to local docker agent
@@ -181,7 +181,7 @@ func (m *mirror) tagImage(tag string) error {
 	defer m.timeTrack(time.Now(), "Completed docker tag")
 
 	tagOptions := docker.TagImageOptions{
-		Repo:  fmt.Sprintf("%s/%s", config.Target.Registry, m.targetRepositoryName()),
+		Repo:  fmt.Sprintf("%s/%s", progConf.Target.Registry, m.targetRepositoryName()),
 		Tag:   tag,
 		Force: true,
 	}
@@ -195,16 +195,29 @@ func (m *mirror) pushImage(tag string) error {
 	defer m.timeTrack(time.Now(), "Completed docker push")
 
 	pushOptions := docker.PushImageOptions{
-		Name:              fmt.Sprintf("%s/%s", config.Target.Registry, m.targetRepositoryName()),
-		Registry:          config.Target.Registry,
+		Name:              fmt.Sprintf("%s/%s", progConf.Target.Registry, m.targetRepositoryName()),
+		Registry:          progConf.Target.Registry,
 		Tag:               tag,
 		OutputStream:      &logWriter{logger: m.log.WithField("docker_action", "push")},
 		InactivityTimeout: 1 * time.Minute,
 	}
 
-	creds, err := getDockerCredentials(pushOptions.Registry)
-	if err != nil {
-		return err
+	var creds *docker.AuthConfiguration
+	var err error
+	var auth string
+
+	// from config.yaml - if true, retrieve an authorization token from ECR directly using OIDC
+	if progConf.Oidc {
+		auth, err = m.ecrManager.Login()
+		if err != nil {
+			return err
+		}
+		creds, err = getDockerCredentialsFromAuthToken(auth)
+	} else {
+		creds, err = getDockerCredentials(pushOptions.Registry)
+		if err != nil {
+			return err
+		}
 	}
 
 	return m.dockerClient.PushImage(pushOptions, *creds)
